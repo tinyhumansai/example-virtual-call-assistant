@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { settingsStore } from './settings-store';
 import { kbService } from './kb-service';
+import { memoryStore } from './memory-store';
 import type { AnalysisResult, TranscriptSegment, StreamToken } from '../../shared/types';
 
 export type StreamCallback = (token: StreamToken) => void;
@@ -21,7 +22,9 @@ interface AnalyzeOptions {
 async function buildSystemPrompt(
     transcript: TranscriptSegment[],
     screenText: string,
-    mode: string
+    mode: string,
+    sessionId: string,
+    responseFormat: 'json' | 'text'
 ): Promise<{ systemPrompt: string; kbContext: string }> {
     // Get transcript text for KB retrieval
     const recentText = transcript
@@ -36,6 +39,41 @@ async function buildSystemPrompt(
         if (chunks.length > 0) {
             kbContext = '### Company Knowledge Base\n' + chunks.map((c) => `- ${c.text}`).join('\n');
         }
+    } catch { }
+
+    // Memory SDK: query + recall for richer context
+    let memorySessionText = '';
+    let memoryLongtermText = '';
+    let recalledMemoriesText = '';
+    let memoryCompanyKbText = '';
+    try {
+        const [sessionText, longtermText, recalledMemories, companyKbText] = await Promise.all([
+            memoryStore.queryMemoryToText({
+                query: recentText,
+                namespace: memoryStore.sessionNamespace(sessionId),
+                includeReferences: false,
+                maxChunks: 5,
+            }),
+            memoryStore.recallMemoryToText({
+                namespace: memoryStore.meetingsNamespace(),
+                maxChunks: 4,
+            }),
+            memoryStore.recallMemoriesToText({
+                namespace: memoryStore.meetingsNamespace(),
+                topK: 5,
+            }),
+            memoryStore.queryMemoryToText({
+                query: recentText,
+                namespace: memoryStore.companyKbNamespace(),
+                includeReferences: false,
+                maxChunks: 3,
+            }),
+        ]);
+
+        memorySessionText = sessionText;
+        memoryLongtermText = longtermText;
+        recalledMemoriesText = recalledMemories;
+        memoryCompanyKbText = companyKbText;
     } catch { }
 
     // Build transcript context
@@ -54,8 +92,19 @@ async function buildSystemPrompt(
         sales: 'You are a sales call assistant. Help with objection handling, product info retrieval, and engagement tips.',
     }[mode] || '';
 
-    const systemPrompt = `You are VideoAgent, an invisible AI co-pilot for live meetings.
+    const memoryCtxParts = [
+        memorySessionText ? `### Memory (Session)\n${memorySessionText.slice(0, 2500)}` : '',
+        memoryLongtermText ? `### Memory (Long-term)\n${memoryLongtermText.slice(0, 2500)}` : '',
+        recalledMemoriesText ? `### Recalled Memories\n${recalledMemoriesText.slice(0, 2000)}` : '',
+        memoryCompanyKbText ? `### Memory (Company KB)\n${memoryCompanyKbText.slice(0, 2000)}` : '',
+    ].filter(Boolean);
+
+    const memoryCtx = memoryCtxParts.join('\n\n');
+
+    const baseSystemPrompt = `You are VideoAgent, an invisible AI co-pilot for live meetings.
 ${modeInstructions}
+
+${memoryCtx}
 
 ${kbContext}
 
@@ -63,6 +112,11 @@ ${screenCtx}
 
 ### Recent Conversation Transcript
 ${transcriptCtx}
+`;
+
+    const systemPrompt =
+        responseFormat === 'json'
+            ? `${baseSystemPrompt}
 
 Respond with a JSON object in this exact format:
 {
@@ -72,7 +126,15 @@ Respond with a JSON object in this exact format:
   "sentimentScore": <number between -1 and 1>,
   "actionItems": ["<action1>", "<action2>"],
   "suggestedResponses": ["<response1>", "<response2>"]
-}`;
+}`
+            : `${baseSystemPrompt}
+
+Use the provided context to answer the user request.
+Answer with plain text (no JSON).
+If the app is in interview mode, provide a detailed, interview-ready response:
+- direct guidance
+- concrete examples from the transcript/context when available
+- suggested follow-up questions or interviewer prompts where helpful`;
 
     return { systemPrompt, kbContext };
 }
@@ -156,10 +218,12 @@ async function analyzeWithGemini(
 // ────────────────────────────────────────────────────────────────
 
 export async function analyzeConversation(options: AnalyzeOptions): Promise<AnalysisResult> {
-    const { systemPrompt, kbContext } = await buildSystemPrompt(
+    const { systemPrompt } = await buildSystemPrompt(
         options.transcript,
         options.screenText || '',
-        options.mode
+        options.mode,
+        options.sessionId,
+        'json'
     );
 
     const settings = settingsStore.get();
@@ -203,12 +267,22 @@ export async function analyzeConversation(options: AnalyzeOptions): Promise<Anal
 export async function askQuestion(
     question: string,
     transcript: TranscriptSegment[],
+    sessionId: string,
+    mode: 'meeting' | 'interview' | 'sales',
     onStream: StreamCallback
-): Promise<void> {
+): Promise<string> {
     const settings = settingsStore.get();
-    const { systemPrompt } = await buildSystemPrompt(transcript, '', 'meeting');
+    const { systemPrompt } = await buildSystemPrompt(transcript, '', mode, sessionId, 'text');
 
-    const fullPrompt = `${systemPrompt}\n\nUser question: "${question}"\n\nProvide a helpful, concise answer in plain text (not JSON).`;
+    const modeAnswerStyle =
+        mode === 'interview'
+            ? 'Provide a detailed interview-grade answer. Include reasoning grounded in the transcript/context, and end with 2-4 follow-up interviewer questions when relevant.'
+            : mode === 'sales'
+              ? 'Provide a helpful sales-ready answer with concrete next steps.'
+              : 'Provide a helpful answer with enough detail for real-time meetings.';
+
+    const fullPrompt = `${systemPrompt}\n\nUser question: "${question}"\n\n${modeAnswerStyle}`;
+    let fullAnswer = '';
 
     try {
         if (settings.aiProvider === 'gemini' && settings.geminiApiKey) {
@@ -216,7 +290,9 @@ export async function askQuestion(
             const model = genAI.getGenerativeModel({ model: settings.geminiModel || 'gemini-1.5-flash' });
             const result = await model.generateContentStream(fullPrompt);
             for await (const chunk of result.stream) {
-                onStream({ token: chunk.text(), isDone: false });
+                const token = chunk.text();
+                if (token) fullAnswer += token;
+                onStream({ token, isDone: false });
             }
         } else {
             const client = new OpenAI({ apiKey: settings.openaiApiKey });
@@ -226,12 +302,18 @@ export async function askQuestion(
             });
             for await (const chunk of stream) {
                 const token = chunk.choices[0]?.delta?.content || '';
-                if (token) onStream({ token, isDone: false });
+                if (token) {
+                    fullAnswer += token;
+                    onStream({ token, isDone: false });
+                }
             }
         }
     } catch (err) {
         onStream({ token: 'Error: ' + String(err), isDone: false });
+        onStream({ token: '', isDone: true });
+        return '';
     }
 
     onStream({ token: '', isDone: true });
+    return fullAnswer.trim();
 }

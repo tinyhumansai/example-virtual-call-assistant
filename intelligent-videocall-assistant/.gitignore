@@ -27,6 +27,7 @@ dist-*
 out
 release
 build
+.next/
 
 ### Electron specific ###
 dist-electron
@@ -60,3 +61,4 @@ coverage
 .cache
 .parcel-cache
 *.tgz
+

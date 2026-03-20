@@ -88,6 +88,10 @@ export interface AppSettings {
     geminiModel: string;
     whisperModel: string;
     audioInputDeviceId?: string;
+    // TinyHumans / Neocortex memory token (used for insert/query/recall/delete)
+    memoryApiToken: string;
+    memoryBaseUrl?: string;
+    memoryNamespacePrefix: string;
     enableScreenCapture: boolean;
     enableOcr: boolean;
     overlayShortcut: string;

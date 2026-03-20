@@ -17,6 +17,7 @@ import { settingsStore } from './services/settings-store';
 import { registerAudioIPC } from './ipc/audio.ipc';
 import { registerAIIPC } from './ipc/ai.ipc';
 import { registerKBIPC } from './ipc/kb.ipc';
+import { registerInterviewIPC } from './ipc/interview.ipc';
 import { IPC_CHANNELS } from '../shared/types';
 import { startMeetingDetection, setMeetingListeners } from './services/meeting-detector';
 import { extractTextFromScreen } from './services/screen-capture';
@@ -108,7 +109,11 @@ function createOverlayWindow(): BrowserWindow {
         settingsStore.save({ overlayPosition: { x, y } });
     });
 
-    if (isDev) win.webContents.openDevTools({ mode: 'detach' });
+    // Avoid automatically opening Electron devtools on every run.
+    // Set VA_OPEN_DEVTOOLS=1 to enable.
+    if (isDev && process.env.VA_OPEN_DEVTOOLS === '1') {
+        win.webContents.openDevTools({ mode: 'detach' });
+    }
 
     return win;
 }
@@ -130,7 +135,9 @@ function createMainWindow(): BrowserWindow {
     });
 
     win.loadURL(getRendererUrl('/dashboard'));
-    if (isDev) win.webContents.openDevTools({ mode: 'detach' });
+    if (isDev && process.env.VA_OPEN_DEVTOOLS === '1') {
+        win.webContents.openDevTools({ mode: 'detach' });
+    }
     return win;
 }
 
@@ -212,6 +219,16 @@ function registerAppIPC(): void {
         return settingsStore.get();
     });
 
+    // Sessions are currently runtime-memory only (no persistence implemented yet).
+    // These handlers prevent "No handler registered" errors from the renderer.
+    ipcMain.handle(IPC_CHANNELS.GET_SESSIONS, async () => {
+        return [];
+    });
+
+    ipcMain.handle(IPC_CHANNELS.GET_SESSION, async (_event, _id: string) => {
+        return null;
+    });
+
     ipcMain.on(IPC_CHANNELS.TOGGLE_OVERLAY, () => toggleOverlay());
 
     ipcMain.on(IPC_CHANNELS.OPEN_MAIN_WINDOW, () => {
@@ -253,6 +270,7 @@ app.whenReady().then(async () => {
     registerAudioIPC();
     registerAIIPC();
     registerKBIPC();
+    registerInterviewIPC();
 
     // Create windows
     overlayWindow = createOverlayWindow();

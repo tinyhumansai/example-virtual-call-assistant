@@ -15,6 +15,11 @@ const DEFAULT_SETTINGS: AppSettings = {
     overlayPosition: { x: 0, y: 0 },
     overlayWidth: 420,
     theme: 'system',
+    // TinyHumans / Neocortex token env compatibility:
+    // - MEMORY_API_TOKEN (preferred by this app)
+    // - ALPHAHUMAN_TOKEN (present in your current .env)
+    memoryApiToken: process.env.MEMORY_API_TOKEN || process.env.ALPHAHUMAN_TOKEN || '',
+    memoryNamespacePrefix: process.env.MEMORY_NAMESPACE_PREFIX || 'video-agent',
 };
 
 class SettingsStore {
@@ -33,12 +38,15 @@ class SettingsStore {
         return {
             ...saved,
             // Prefer persisted values, but fall back to env vars when fields are empty.
-            openaiApiKey: saved.openaiApiKey || process.env.OPENAI_API_KEY || '',
-            geminiApiKey: saved.geminiApiKey || process.env.GEMINI_API_KEY || '',
-            aiProvider: saved.aiProvider || ((process.env.AI_PROVIDER as 'openai' | 'gemini') || 'openai'),
-            openaiModel: saved.openaiModel || process.env.OPENAI_MODEL || 'gpt-4o',
-            geminiModel: saved.geminiModel || process.env.GEMINI_MODEL || 'gemini-1.5-flash',
-            whisperModel: saved.whisperModel || process.env.WHISPER_MODEL || 'whisper-1',
+            openaiApiKey: process.env.OPENAI_API_KEY || '',
+            geminiApiKey: process.env.GEMINI_API_KEY || '',
+            aiProvider: (process.env.AI_PROVIDER as 'openai' | 'gemini') || 'openai',
+            openaiModel: process.env.OPENAI_MODEL || 'gpt-4o',
+            geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+            whisperModel: process.env.WHISPER_MODEL || 'whisper-1',
+            memoryApiToken: process.env.MEMORY_API_TOKEN || process.env.ALPHAHUMAN_TOKEN || '',
+            memoryBaseUrl: process.env.MEMORY_BASE_URL || process.env.ALPHAHUMAN_BASE_URL || undefined,
+            memoryNamespacePrefix: process.env.MEMORY_NAMESPACE_PREFIX || 'video-agent',
         };
     }
 
