@@ -5,6 +5,7 @@ import OpenAI from 'openai';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
 import { settingsStore } from './settings-store';
+import { memoryStore } from './memory-store';
 import type { KBDocument, KBReference } from '../../shared/types';
 
 interface KBChunk {
@@ -169,6 +170,24 @@ class KBService {
             doc.status = 'ready';
             this.documents.set(id, doc);
             this.saveDocuments();
+
+            // Optional: also ingest document chunks into TinyHumans/Neocortex memory.
+            // This lets queryMemory-based RAG use company KB even across app restarts.
+            try {
+                const MEMORY_INGEST_MAX_CHUNKS = 20;
+                const namespace = memoryStore.companyKbNamespace();
+                for (let i = 0; i < Math.min(textChunks.length, MEMORY_INGEST_MAX_CHUNKS); i++) {
+                    const chunkText = textChunks[i];
+                    await memoryStore.insertMemory({
+                        title: `KB chunk (${fileName}) #${i}`,
+                        content: chunkText,
+                        namespace,
+                        sourceType: 'doc',
+                        metadata: { documentId: id, documentName: fileName, chunkIndex: i, type },
+                        priority: 'medium',
+                    });
+                }
+            } catch { }
         } catch (err) {
             doc.status = 'error';
             this.documents.set(id, doc);
